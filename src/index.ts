@@ -1,66 +1,111 @@
+
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-function createServer() {
-	const server = new McpServer({
-		name: "Authless Calculator",
-		version: "1.0.0",
-	});
+type Env = {
+  IMAGE_UPLOAD_WORKER_URL: string;
+  UPLOAD_ACCESS_TOKEN: string;
+};
 
-	server.registerTool(
-		"add",
-		{ inputSchema: z.object({ a: z.number(), b: z.number() }) },
-		async ({ a, b }) => ({
-			content: [{ type: "text", text: String(a + b) }],
-		}),
-	);
+function createServer(env: Env) {
+  const server = new McpServer({
+    name: "Aza Creative Uploader",
+    version: "1.0.0",
+  });
 
-	server.registerTool(
-		"calculate",
-		{
-			inputSchema: z.object({
-				operation: z.enum(["add", "subtract", "multiply", "divide"]),
-				a: z.number(),
-				b: z.number(),
-			}),
-		},
-		async ({ operation, a, b }) => {
-			let result: number;
-			switch (operation) {
-				case "add":
-					result = a + b;
-					break;
-				case "subtract":
-					result = a - b;
-					break;
-				case "multiply":
-					result = a * b;
-					break;
-				case "divide":
-					if (b === 0)
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Error: Cannot divide by zero",
-								},
-							],
-						};
-					result = a / b;
-					break;
-			}
-			return { content: [{ type: "text", text: String(result) }] };
-		},
-	);
+  server.registerTool(
+    "upload_creative_to_imagekit",
+    {
+      description:
+        "Upload an Aza campaign creative image to ImageKit and return its hosted URL for use in WebEngage.",
+      inputSchema: z.object({
+        filename: z.string().min(1).max(200),
+        contentType: z.enum([
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+        ]),
+        imageBase64: z.string().min(1).max(12_000_000),
+      }),
+    },
+    async ({ filename, contentType, imageBase64 }) => {
+      try {
+        const cleanBase64 = imageBase64.replace(
+          /^data:image\/[a-zA-Z0-9.+-]+;base64,/,
+          "",
+        );
 
-	return server;
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
+          throw new Error("Invalid Base64 image data.");
+        }
+
+        const binary = atob(cleanBase64);
+        if (binary.length === 0 || binary.length > 9_000_000) {
+          throw new Error("Image must be smaller than 9 MB.");
+        }
+
+        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+        const file = new File([bytes], filename, { type: contentType });
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await fetch(env.IMAGE_UPLOAD_WORKER_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.UPLOAD_ACCESS_TOKEN}`,
+          },
+          body: formData,
+        });
+
+        const result = (await response.json()) as {
+          success?: boolean;
+          name?: string;
+          url?: string;
+          error?: string;
+        };
+
+        if (!response.ok || !result.success || !result.url) {
+          throw new Error(
+            result.error || `Upload failed with status ${response.status}.`,
+          );
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                filename: result.name || filename,
+                imageUrl: result.url,
+                message: "Creative uploaded successfully to ImageKit.",
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text" as const,
+              text:
+                error instanceof Error
+                  ? error.message
+                  : "Image upload failed.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  return server;
 }
 
-const handler = createMcpHandler(createServer);
-
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		return handler(request, env, ctx);
-	},
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    return createMcpHandler(() => createServer(env))(request, env, ctx);
+  },
 } satisfies ExportedHandler<Env>;
