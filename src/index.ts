@@ -6,6 +6,7 @@ import { z } from "zod";
 type Env = {
   IMAGE_UPLOAD_WORKER_URL: string;
   UPLOAD_ACCESS_TOKEN: string;
+  MCP_ACCESS_TOKEN: string;
 };
 
 function createServer(env: Env) {
@@ -18,7 +19,7 @@ function createServer(env: Env) {
     "upload_creative_to_imagekit",
     {
       description:
-        "Upload an Aza campaign creative image to ImageKit and return its hosted URL for use in WebEngage.",
+        "Upload a campaign creative image to ImageKit and return its hosted URL for WebEngage.",
       inputSchema: z.object({
         filename: z.string().min(1).max(200),
         contentType: z.enum([
@@ -36,17 +37,28 @@ function createServer(env: Env) {
           "",
         );
 
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
+        if (
+          !/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64) ||
+          cleanBase64.length % 4 !== 0
+        ) {
           throw new Error("Invalid Base64 image data.");
         }
 
         const binary = atob(cleanBase64);
+
         if (binary.length === 0 || binary.length > 9_000_000) {
           throw new Error("Image must be smaller than 9 MB.");
         }
 
-        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-        const file = new File([bytes], filename, { type: contentType });
+        const bytes = Uint8Array.from(
+          binary,
+          (character) => character.charCodeAt(0),
+        );
+
+        const file = new File([bytes], filename, {
+          type: contentType,
+        });
+
         const formData = new FormData();
         formData.append("file", file);
 
@@ -67,7 +79,7 @@ function createServer(env: Env) {
 
         if (!response.ok || !result.success || !result.url) {
           throw new Error(
-            result.error || `Upload failed with status ${response.status}.`,
+            result.error || `Image upload failed (${response.status}).`,
           );
         }
 
@@ -79,7 +91,6 @@ function createServer(env: Env) {
                 success: true,
                 filename: result.name || filename,
                 imageUrl: result.url,
-                message: "Creative uploaded successfully to ImageKit.",
               }),
             },
           ],
@@ -105,7 +116,29 @@ function createServer(env: Env) {
 }
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    return createMcpHandler(() => createServer(env))(request, env, ctx);
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const expectedToken = `Bearer ${env.MCP_ACCESS_TOKEN}`;
+    const suppliedToken = request.headers.get("Authorization") || "";
+
+    if (
+      !env.MCP_ACCESS_TOKEN ||
+      suppliedToken.length !== expectedToken.length
+    ) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    let mismatch = 0;
+
+    for (let i = 0; i < expectedToken.length; i++) {
+      mismatch |= suppliedToken.charCodeAt(i) ^ expectedToken.charCodeAt(i);
+    }
+
+    if (mismatch !== 0) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    const handler = createMcpHandler(() => createServer(env));
+
+    return handler(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
