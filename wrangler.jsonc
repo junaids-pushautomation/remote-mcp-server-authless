@@ -1,14 +1,17 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "remote-mcp-server-authless",
-	"main": "src/index.ts",
-	"compatibility_date": "2026-07-02",
-	"compatibility_flags": ["nodejs_compat"],
-	"observability": {
-		"enabled": true,
-	},
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "remote-mcp-server-authless",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "CREATIVE_DB",
+      "database_name": "aza-creative-library",
+      "database_id": "71b3663a-67d3-4c11-9961-fe465c0543ce"
+    }
+  ]
 }
