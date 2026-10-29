@@ -1,4 +1,3 @@
-
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
@@ -7,14 +6,16 @@ type Env = {
   IMAGE_UPLOAD_WORKER_URL: string;
   UPLOAD_ACCESS_TOKEN: string;
   MCP_ACCESS_TOKEN: string;
+  CREATIVE_DB: D1Database;
 };
 
 function createServer(env: Env) {
   const server = new McpServer({
     name: "Aza Creative Uploader",
-    version: "1.0.0",
+    version: "1.1.0",
   });
 
+  // Existing tool: upload a creative image to ImageKit.
   server.registerTool(
     "upload_creative_to_imagekit",
     {
@@ -112,11 +113,94 @@ function createServer(env: Env) {
     },
   );
 
+  // New tool: retrieve creatives saved for a campaign date.
+  server.registerTool(
+    "list_creatives_by_date",
+    {
+      description:
+        "Retrieve Aza campaign creatives from Cloudflare D1 by campaign date. Returns original filenames, ImageKit URLs, orientations, and WebEngage target columns. Use these records to map creative URLs to matching filenames in a WebEngage CSV. Dates must use YYYY-MM-DD format.",
+      inputSchema: z.object({
+        campaignDate: z
+          .string()
+          .regex(
+            /^\d{4}-\d{2}-\d{2}$/,
+            "Use YYYY-MM-DD format for the campaign date.",
+          ),
+      }),
+    },
+    async ({ campaignDate }) => {
+      try {
+        const result = await env.CREATIVE_DB
+          .prepare(
+            `SELECT
+               campaign_date,
+               filename,
+               image_url,
+               orientation,
+               target_column,
+               content_type,
+               created_at
+             FROM creatives
+             WHERE campaign_date = ?
+             ORDER BY filename COLLATE NOCASE ASC
+             LIMIT 500`,
+          )
+          .bind(campaignDate)
+          .all<{
+            campaign_date: string;
+            filename: string;
+            image_url: string;
+            orientation: string;
+            target_column: string;
+            content_type: string | null;
+            created_at: string | null;
+          }>();
+
+        const creatives = result.results ?? [];
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                campaignDate,
+                count: creatives.length,
+                creatives,
+                message:
+                  creatives.length > 0
+                    ? `Found ${creatives.length} creative(s) for ${campaignDate}.`
+                    : `No creatives found for ${campaignDate}.`,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text" as const,
+              text:
+                error instanceof Error
+                  ? `Failed to retrieve creatives: ${error.message}`
+                  : "Failed to retrieve creatives from the database.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
   return server;
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
     const expectedToken = `Bearer ${env.MCP_ACCESS_TOKEN}`;
     const suppliedToken = request.headers.get("Authorization") || "";
 
@@ -130,7 +214,8 @@ export default {
     let mismatch = 0;
 
     for (let i = 0; i < expectedToken.length; i++) {
-      mismatch |= suppliedToken.charCodeAt(i) ^ expectedToken.charCodeAt(i);
+      mismatch |=
+        suppliedToken.charCodeAt(i) ^ expectedToken.charCodeAt(i);
     }
 
     if (mismatch !== 0) {
